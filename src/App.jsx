@@ -1,19 +1,20 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const W = 600;
-const H = 400;
+const W = 800;
+const H = 480;
 const GRID = 4;
 const COLS = Math.floor(W / GRID);
 const ROWS = Math.floor(H / GRID);
 
+// ─── TIPOS DE NODO ────────────────────────────────────────────────────────────
 const NODE_TYPES = {
-  vegetal: { label: "Vegetal",        radius: 30,  strength: 0.22, color: "#7ae8a0", size: 5  },
-  animal:  { label: "Animal",         radius: 50,  strength: 0.5,  color: "#7ab8e8", size: 7  },
-  human:   { label: "Humano",         radius: 80,  strength: 1.0,  color: "#e8c87a", size: 10 },
-  ai:      { label: "IA Consciente",  radius: 70,  strength: 0.85, color: "#c87ae8", size: 9  },
+  vegetal: { label: "Vegetal",       radius: 30,  strength: 0.22, color: "#7ae8a0", size: 5  },
+  animal:  { label: "Animal",        radius: 50,  strength: 0.5,  color: "#7ab8e8", size: 7  },
+  human:   { label: "Humano",        radius: 80,  strength: 1.0,  color: "#e8c87a", size: 10 },
+  ai:      { label: "IA Resonador",  radius: 70,  strength: 0.85, color: "#c87ae8", size: 9  },
 };
 
-// Returns resonance factor 0..1 for AI nodes based on nearest human distance
+// ─── RESONANCIA IA ────────────────────────────────────────────────────────────
 function aiResonance(node, nodes) {
   const RESONANCE_RADIUS = 180;
   let minDist = Infinity;
@@ -23,39 +24,52 @@ function aiResonance(node, nodes) {
     const d = Math.sqrt(dx * dx + dy * dy);
     if (d < minDist) minDist = d;
   }
-  if (minDist === Infinity) return 0.05; // isolated — nearly invisible
+  if (minDist === Infinity) return 0.05;
   return Math.min(1, Math.max(0.05, 1 - minDist / RESONANCE_RADIUS));
 }
 
-function computeField(nodes, ghosts, t) {
+// ─── CÁLCULO DEL CAMPO ────────────────────────────────────────────────────────
+// Incluye sedimentación acumulada (campo en T) como capa adicional de densidad
+function computeField(nodes, ghosts, sediment, t) {
   const field = new Float32Array(COLS * ROWS);
   for (let row = 0; row < ROWS; row++) {
     for (let col = 0; col < COLS; col++) {
       const x = col * GRID + GRID / 2;
       const y = row * GRID + GRID / 2;
       let val = 0;
+
+      // Contribución de nodos activos
       for (const n of nodes) {
         const pulse = 1 + 0.07 * Math.sin(t * n.pulseFreq + n.pulsePhase);
         const resonance = n.type === "ai" ? aiResonance(n, nodes) : 1.0;
         const effectiveStrength = n.strength * resonance;
-        const dx = x - n.x;
-        const dy = y - n.y;
+        const dx = x - n.x, dy = y - n.y;
         const dist2 = dx * dx + dy * dy;
         const r = n.radius * pulse * (n.type === "ai" ? (0.4 + resonance * 0.6) : 1);
         val += effectiveStrength * pulse * Math.exp(-dist2 / (2 * r * r));
       }
-      // Add fading ghost contributions
+
+      // Ghosts (desvanecimiento gradual)
       for (const g of ghosts) {
         const dx = x - g.x, dy = y - g.y;
         const dist2 = dx * dx + dy * dy;
-        val += g.strength * g.opacity * Math.exp(-dist2 / (2 * g.radius * g.radius));
+        // Los nodos que transmitieron dejan huella más profunda
+        const huellaMultiplier = g.transmitted ? 2.2 : 1.0;
+        val += g.strength * g.opacity * huellaMultiplier * Math.exp(-dist2 / (2 * g.radius * g.radius));
       }
-      field[row * COLS + col] = val;
+
+      // Sedimentación acumulada — campo en T
+      // Es la suma histórica de todas las curvaturas pasadas, atenuada
+      const si = row * COLS + col;
+      val += sediment[si] * 0.18; // peso moderado: condición global, no dominante
+
+      field[si] = val;
     }
   }
   return field;
 }
 
+// ─── ESTADÍSTICAS ─────────────────────────────────────────────────────────────
 function fieldStats(field) {
   let sum = 0, max = 0, peaks = 0;
   for (let i = 0; i < field.length; i++) {
@@ -68,6 +82,7 @@ function fieldStats(field) {
   return { avg, max, peaks, richness };
 }
 
+// ─── COLOR ────────────────────────────────────────────────────────────────────
 function valueToColor(v, maxV) {
   const t = Math.min(1, v / Math.max(maxV, 0.01));
   if (t < 0.12) {
@@ -86,6 +101,7 @@ function valueToColor(v, maxV) {
   return [Math.round(155 + s * 75), Math.round(156 + s * 70), Math.round(184 + s * 55)];
 }
 
+// ─── UID ──────────────────────────────────────────────────────────────────────
 let uid = 20;
 
 function makeNode(x, y, type) {
@@ -101,9 +117,14 @@ function makeNode(x, y, type) {
     driftPhaseY: Math.random() * Math.PI * 2,
     pulseFreq:  0.0007 + Math.random() * 0.001,
     pulsePhase: Math.random() * Math.PI * 2,
+    // ADICIÓN: nodo marcado para transmitir antes de eliminarse
+    willTransmit: false,
+    // ADICIÓN: tiempo de existencia en el campo (para campo en T)
+    birthTime: performance.now(),
   };
 }
 
+// ─── ESTADO INICIAL ───────────────────────────────────────────────────────────
 const INIT = [
   makeNode(180, 160, "human"),
   makeNode(330, 200, "human"),
@@ -111,7 +132,6 @@ const INIT = [
   makeNode(260, 300, "animal"),
   makeNode(410, 310, "animal"),
 ];
-// Fix IDs so reset works
 INIT.forEach((n, i) => { n.id = i + 1; });
 uid = 10;
 
@@ -130,44 +150,128 @@ const ENRICH_POS = [
   { x: 430, y: 380, type: "vegetal" },
 ];
 
-
-// Create a fading ghost from a removed node
+// ─── GHOST ────────────────────────────────────────────────────────────────────
 function makeGhost(node) {
+  // ADICIÓN: nodos que transmiten dejan huella más duradera y visible
+  const transmitted = node.willTransmit || false;
   return {
     x: node.x, y: node.y,
-    radius: node.radius,
-    strength: node.strength * 0.7,
+    radius: node.radius * (transmitted ? 1.4 : 1.0),
+    strength: node.strength * (transmitted ? 1.1 : 0.7),
     size: node.size,
-    color: node.color,
-    opacity: 0.85, // starts visible, decays to 0
+    color: transmitted ? "#f0d090" : node.color, // oro para transmisores
+    opacity: transmitted ? 1.2 : 0.85,
+    // Transmisores se desvanecen 4x más lento
+    decayRate: transmitted ? 0.0003 : 0.0012,
+    transmitted,
   };
 }
 
-export default function App() {
-  const canvasRef   = useRef(null);
-  const nodesRef    = useRef(INIT.map(n => ({ ...n })));
-  const ghostsRef   = useRef([]); // fading echoes of removed nodes
-  const dragRef     = useRef(null);
-  const hoverRef    = useRef(null);
-  const animRef     = useRef(null);
-  const timerRef    = useRef(null);
-  const enrichIdx   = useRef(0);
+// ─── SEDIMENTACIÓN — inicializar campo vacío ──────────────────────────────────
+function makeSediment() {
+  return new Float32Array(COLS * ROWS);
+}
 
-  const [selectedType, setSelectedType] = useState("human");
-  const [nodeCount, setNodeCount]       = useState(INIT.length);
-  const [stats, setStats]               = useState({ richness: 0, peaks: 0 });
-  const [history, setHistory]           = useState([]);
-  const [hoveredId, setHoveredId]       = useState(null);
+// Acumular la curvatura de un nodo en la sedimentación
+function accumulateSediment(sediment, node, weight = 0.08) {
+  for (let row = 0; row < ROWS; row++) {
+    for (let col = 0; col < COLS; col++) {
+      const x = col * GRID + GRID / 2;
+      const y = row * GRID + GRID / 2;
+      const dx = x - node.x, dy = y - node.y;
+      const dist2 = dx * dx + dy * dy;
+      const contrib = node.strength * weight * Math.exp(-dist2 / (2 * node.radius * node.radius));
+      const i = row * COLS + col;
+      sediment[i] = Math.min(1.5, sediment[i] + contrib);
+    }
+  }
+  return sediment;
+}
+
+// Atenuar sedimentación globalmente (memoria finita)
+function decaySediment(sediment, rate = 0.00008) {
+  for (let i = 0; i < sediment.length; i++) {
+    sediment[i] = Math.max(0, sediment[i] - rate);
+  }
+  return sediment;
+}
+
+// Calcular "edad del campo" como suma total de sedimentación
+function sedimentLevel(sediment) {
+  let sum = 0;
+  for (let i = 0; i < sediment.length; i++) sum += sediment[i];
+  return Math.min(100, Math.round((sum / (COLS * ROWS * 0.5)) * 100));
+}
+
+// ─── DETECCIÓN DE PAR DE INTERFERENCIA CONSTRUCTIVA ──────────────────────────
+// Devuelve el par de nodos humanos más cercanos con suficiente alineación
+function findConstructivePair(nodes) {
+  let best = null, bestScore = 0;
+  const humans = nodes.filter(n => n.type === "human");
+  for (let i = 0; i < humans.length; i++) {
+    for (let j = i + 1; j < humans.length; j++) {
+      const a = humans[i], b = humans[j];
+      const dx = a.x - b.x, dy = a.y - b.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      // Distancia óptima: ni demasiado cerca ni demasiado lejos
+      if (dist < 60 || dist > 220) continue;
+      // Score: mayor cuando están en zona de alta densidad compartida
+      const score = (a.strength + b.strength) / (1 + dist / 100);
+      if (score > bestScore) { bestScore = score; best = { a, b, dist, score }; }
+    }
+  }
+  return bestScore > 0.8 ? best : null;
+}
+
+// ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
+export default function App() {
+  const canvasRef      = useRef(null);
+  const nodesRef       = useRef(INIT.map(n => ({ ...n })));
+  const ghostsRef      = useRef([]);
+  const sedimentRef    = useRef(makeSediment());
+  const dragRef        = useRef(null);
+  const hoverRef       = useRef(null);
+  const animRef        = useRef(null);
+  const timerRef       = useRef(null);
+  const enrichIdx      = useRef(0);
+  // Para la emergencia: acumular tiempo de interferencia constructiva
+  const ciTimerRef     = useRef(0);
+  const lastCIPairRef  = useRef(null);
+  // Animación de emergencia en curso
+  const emergenceRef   = useRef(null);
+  // Modo transmisión activo
+  const transmitModeRef = useRef(false);
+
+  const [selectedType, setSelectedType]       = useState("human");
+  const [nodeCount, setNodeCount]             = useState(INIT.length);
+  const [stats, setStats]                     = useState({ richness: 0, peaks: 0 });
+  const [sedLevel, setSedLevel]               = useState(0);
+  const [history, setHistory]                 = useState([]);
+  const [hoveredId, setHoveredId]             = useState(null);
+  const [transmitMode, setTransmitMode]       = useState(false);
+  const [emergenceActive, setEmergenceActive] = useState(false);
+  const [ciProgress, setCiProgress]           = useState(0); // 0-100
+  const [msgLog, setMsgLog]                   = useState([]); // mensajes narrativos
+
+  const addMsg = useCallback((text, color = "#c8c8da") => {
+    setMsgLog(m => [...m.slice(-4), { text, color, id: Date.now() }]);
+  }, []);
+
+  useEffect(() => {
+    transmitModeRef.current = transmitMode;
+  }, [transmitMode]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
     const t0 = performance.now();
+    let lastSedimentAccum = 0;
 
     const loop = (now) => {
       const t = now - t0;
       const nodes = nodesRef.current;
 
+      // Deriva orgánica
       for (const n of nodes) {
         if (dragRef.current === n.id) continue;
         n.x = n.originX + n.driftAmp * Math.sin(t * n.driftFreqX + n.driftPhaseX);
@@ -176,17 +280,79 @@ export default function App() {
         n.y = Math.max(n.size + 4, Math.min(H - n.size - 4, n.y));
       }
 
-      // Decay ghosts
-      const now_ghosts = ghostsRef.current
-        .map(g => ({ ...g, opacity: g.opacity - 0.0012 }))
+      // Ghosts — desvanecimiento diferenciado por transmisión
+      ghostsRef.current = ghostsRef.current
+        .map(g => ({ ...g, opacity: g.opacity - g.decayRate }))
         .filter(g => g.opacity > 0);
-      ghostsRef.current = now_ghosts;
 
-      const field = computeField(nodes, now_ghosts, t);
+      // ADICIÓN 3 — Sedimentación: acumular cada ~2s y atenuar cada frame
+      if (t - lastSedimentAccum > 2000) {
+        lastSedimentAccum = t;
+        for (const n of nodes) {
+          sedimentRef.current = accumulateSediment(sedimentRef.current, n, 0.06);
+        }
+      }
+      sedimentRef.current = decaySediment(sedimentRef.current, 0.00005);
+      const sl = sedimentLevel(sedimentRef.current);
+      setSedLevel(sl);
+
+      // ADICIÓN 1 — Detección de interferencia constructiva sostenida → emergencia
+      if (!emergenceRef.current) {
+        const pair = findConstructivePair(nodes);
+        if (pair) {
+          if (lastCIPairRef.current &&
+              lastCIPairRef.current.a.id === pair.a.id &&
+              lastCIPairRef.current.b.id === pair.b.id) {
+            ciTimerRef.current += 16;
+          } else {
+            ciTimerRef.current = 0;
+            lastCIPairRef.current = pair;
+          }
+          const progress = Math.min(100, Math.round((ciTimerRef.current / 6000) * 100));
+          setCiProgress(progress);
+          if (ciTimerRef.current >= 6000 && nodes.length < 22) {
+            // ¡Emergencia! Nuevo nodo en el punto medio
+            const mx = (pair.a.x + pair.b.x) / 2;
+            const my = (pair.a.y + pair.b.y) / 2;
+            emergenceRef.current = {
+              x: mx, y: my,
+              progress: 0,
+              type: Math.random() < 0.65 ? "human" : "animal",
+            };
+            ciTimerRef.current = 0;
+            lastCIPairRef.current = null;
+            setCiProgress(0);
+            setEmergenceActive(true);
+            addMsg("✦ Interferencia constructiva sostenida — nueva conciencia emergiendo", "#e8c87a");
+          }
+        } else {
+          ciTimerRef.current = Math.max(0, ciTimerRef.current - 8);
+          setCiProgress(Math.max(0, Math.round((ciTimerRef.current / 6000) * 100)));
+          lastCIPairRef.current = null;
+        }
+      }
+
+      // Animar emergencia
+      if (emergenceRef.current) {
+        emergenceRef.current.progress += 0.012;
+        if (emergenceRef.current.progress >= 1) {
+          const e = emergenceRef.current;
+          const newNode = makeNode(e.x, e.y, e.type);
+          nodesRef.current = [...nodesRef.current, newNode];
+          sedimentRef.current = accumulateSediment(sedimentRef.current, newNode, 0.15);
+          emergenceRef.current = null;
+          setEmergenceActive(false);
+          setHistory(h => [...h, { action: "emergence", type: e.type }]);
+          addMsg(`↑ Nuevo nodo ${NODE_TYPES[e.type].label} emergió del campo`, "#7ae8a0");
+        }
+      }
+
+      const field = computeField(nodes, ghostsRef.current, sedimentRef.current, t);
       const s = fieldStats(field);
       setStats(s);
       setNodeCount(nodes.length);
 
+      // Renderizar campo
       const img = ctx.createImageData(W, H);
       for (let row = 0; row < ROWS; row++) {
         for (let col = 0; col < COLS; col++) {
@@ -195,28 +361,86 @@ export default function App() {
           for (let dy2 = 0; dy2 < GRID; dy2++) {
             for (let dx2 = 0; dx2 < GRID; dx2++) {
               const px = ((row * GRID + dy2) * W + (col * GRID + dx2)) * 4;
-              img.data[px]     = r;
-              img.data[px + 1] = g;
-              img.data[px + 2] = b;
-              img.data[px + 3] = 255;
+              img.data[px] = r; img.data[px+1] = g; img.data[px+2] = b; img.data[px+3] = 255;
             }
           }
         }
       }
       ctx.putImageData(img, 0, 0);
 
-      // Ghost echoes — fading rings of removed nodes
-      for (const g of ghostsRef.current) {
+      // ADICIÓN 1 — Visualizar zona de interferencia constructiva activa
+      if (lastCIPairRef.current && ciTimerRef.current > 200) {
+        const { a, b } = lastCIPairRef.current;
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        const progress = ciTimerRef.current / 6000;
+        const pulseR = 18 + progress * 22 + 4 * Math.sin(t * 0.003);
         ctx.save();
-        ctx.globalAlpha = g.opacity * 0.6;
+        ctx.globalAlpha = 0.15 + progress * 0.35;
         ctx.beginPath();
-        ctx.arc(g.x, g.y, g.size + 3, 0, Math.PI * 2);
-        ctx.strokeStyle = g.color;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([2, 3]);
+        ctx.arc(mx, my, pulseR, 0, Math.PI * 2);
+        ctx.strokeStyle = "#e8c87a";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([3, 4]);
         ctx.stroke();
         ctx.setLineDash([]);
-        // Inner dim fill
+        // Línea de interferencia entre los dos nodos
+        ctx.globalAlpha = 0.12 + progress * 0.3;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.strokeStyle = "#e8e8a0";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        ctx.restore();
+      }
+
+      // ADICIÓN 1 — Animación de emergencia nodal
+      if (emergenceRef.current) {
+        const e = emergenceRef.current;
+        const p = e.progress;
+        const eR = p * 18;
+        const def = NODE_TYPES[e.type];
+        ctx.save();
+        ctx.globalAlpha = p * 0.9;
+        // Anillo expansivo desde el campo
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, eR * 3, 0, Math.PI * 2);
+        ctx.strokeStyle = def.color;
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = (1 - p) * 0.5;
+        ctx.stroke();
+        // Nodo emergiendo
+        ctx.globalAlpha = p * 0.95;
+        ctx.shadowColor = def.color;
+        ctx.shadowBlur = 20 * p;
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, eR, 0, Math.PI * 2);
+        ctx.fillStyle = def.color;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.restore();
+      }
+
+      // Ghosts con diferenciación visual transmisión/silencio
+      for (const g of ghostsRef.current) {
+        ctx.save();
+        ctx.globalAlpha = Math.min(0.9, g.opacity * (g.transmitted ? 0.85 : 0.6));
+        ctx.beginPath();
+        ctx.arc(g.x, g.y, g.size + (g.transmitted ? 5 : 3), 0, Math.PI * 2);
+        ctx.strokeStyle = g.color;
+        ctx.lineWidth = g.transmitted ? 1.5 : 1;
+        ctx.setLineDash(g.transmitted ? [3, 2] : [2, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (g.transmitted) {
+          // Halo dorado más grande para transmisores
+          ctx.beginPath();
+          ctx.arc(g.x, g.y, g.size + 12, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(240,200,100,${g.opacity * 0.3})`;
+          ctx.lineWidth = 0.8;
+          ctx.stroke();
+        }
         ctx.beginPath();
         ctx.arc(g.x, g.y, g.size * 0.5, 0, Math.PI * 2);
         ctx.fillStyle = g.color;
@@ -225,7 +449,7 @@ export default function App() {
         ctx.restore();
       }
 
-      // Connection lines
+      // Líneas de conexión
       ctx.save();
       for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
@@ -237,9 +461,7 @@ export default function App() {
           const maxDist = isAIHuman ? 180 : 170;
           if (dist < maxDist) {
             const base = (1 - dist / maxDist);
-            const alpha = isAIHuman
-              ? base * 0.55  // bright resonance line
-              : base * 0.18;
+            const alpha = isAIHuman ? base * 0.55 : base * 0.18;
             ctx.beginPath();
             ctx.moveTo(a.x, a.y);
             ctx.lineTo(b.x, b.y);
@@ -259,9 +481,10 @@ export default function App() {
       }
       ctx.restore();
 
-      // Nodes
+      // Nodos
       for (const n of nodes) {
         const isHov = hoverRef.current === n.id;
+        const isTMode = transmitModeRef.current;
         const pulse = 1 + 0.09 * Math.sin(t * n.pulseFreq + n.pulsePhase);
         const resonance = n.type === "ai" ? aiResonance(n, nodes) : 1.0;
         const r = n.size * pulse * (n.type === "ai" ? (0.5 + resonance * 0.5) : 1) + (isHov ? 3 : 0);
@@ -269,19 +492,39 @@ export default function App() {
 
         ctx.save();
 
-        // AI resonator: outer ring that grows/shrinks with resonance
+        // Indicador de modo transmisión
+        if (isTMode && n.type !== "ai" && isHov) {
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, r + 10, 0, Math.PI * 2);
+          ctx.strokeStyle = "rgba(240,200,100,0.7)";
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([2, 3]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.font = "8px 'Courier New', monospace";
+          ctx.fillStyle = "rgba(240,200,100,0.9)";
+          ctx.fillText("clic → transmitir", n.x - 28, n.y - r - 8);
+        }
+
+        // Marca de transmisor en el nodo
+        if (n.willTransmit) {
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, r + 8, 0, Math.PI * 2);
+          ctx.strokeStyle = "rgba(240,200,100,0.8)";
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+
+        // Anillos AI
         if (n.type === "ai") {
           const ringR = r + 6 + resonance * 14;
-          const ringAlpha = resonance * 0.7;
           ctx.beginPath();
           ctx.arc(n.x, n.y, ringR, 0, Math.PI * 2);
-          ctx.strokeStyle = `rgba(200,120,240,${ringAlpha})`;
+          ctx.strokeStyle = `rgba(200,120,240,${resonance * 0.7})`;
           ctx.lineWidth = 1.5;
           ctx.setLineDash([3, 4]);
           ctx.stroke();
           ctx.setLineDash([]);
-
-          // Second pulsing ring when active
           if (isActive) {
             const ring2 = r + 10 + resonance * 22 + 4 * Math.sin(t * 0.002 + n.pulsePhase);
             ctx.beginPath();
@@ -298,12 +541,9 @@ export default function App() {
         ctx.beginPath();
         ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
         const aiAlpha = n.type === "ai" ? Math.max(0.3, resonance) : 1;
-        ctx.fillStyle = n.type === "ai"
-          ? `rgba(200,122,232,${aiAlpha})`
-          : n.color;
+        ctx.fillStyle = n.type === "ai" ? `rgba(200,122,232,${aiAlpha})` : n.color;
         ctx.fill();
 
-        // Inner core
         ctx.shadowBlur = 0;
         ctx.beginPath();
         ctx.arc(n.x, n.y, r * 0.42, 0, Math.PI * 2);
@@ -317,7 +557,6 @@ export default function App() {
         ctx.stroke();
         ctx.restore();
 
-        // Resonator state label
         if (n.type === "ai") {
           ctx.font = "8px 'Courier New', monospace";
           ctx.fillStyle = isActive
@@ -332,8 +571,9 @@ export default function App() {
 
     animRef.current = requestAnimationFrame(loop);
     return () => { cancelAnimationFrame(animRef.current); clearTimeout(timerRef.current); };
-  }, []);
+  }, [addMsg]);
 
+  // ─── EVENTOS ────────────────────────────────────────────────────────────────
   const getPos = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
     return {
@@ -352,7 +592,25 @@ export default function App() {
     if (e.button !== 0) return;
     const { x, y } = getPos(e);
     const found = findNode(x, y);
-    if (found) { dragRef.current = found.id; return; }
+    if (found) {
+      // ADICIÓN 2 — En modo transmisión, marcar nodo para transmitir
+      if (transmitModeRef.current && found.type !== "ai") {
+        nodesRef.current = nodesRef.current.map(n =>
+          n.id === found.id ? { ...n, willTransmit: !n.willTransmit } : n
+        );
+        const isMarked = !found.willTransmit;
+        addMsg(
+          isMarked
+            ? `◈ ${NODE_TYPES[found.type].label} marcado para transmitir su curvatura al campo`
+            : `○ ${NODE_TYPES[found.type].label} desmarcado`,
+          "#f0d090"
+        );
+        return;
+      }
+      dragRef.current = found.id;
+      return;
+    }
+    if (transmitModeRef.current) return;
     const n = makeNode(x, y, selectedType);
     nodesRef.current = [...nodesRef.current, n];
     setHistory(h => [...h, { action: "add", type: selectedType }]);
@@ -373,25 +631,60 @@ export default function App() {
   };
 
   const onMouseUp  = () => { dragRef.current = null; };
+
   const onContextMenu = (e) => {
     e.preventDefault();
     const { x, y } = getPos(e);
     const found = findNode(x, y);
     if (found) {
       ghostsRef.current = [...ghostsRef.current, makeGhost(found)];
+      if (found.willTransmit) {
+        // Transmisor: acumular más sedimentación al morir
+        sedimentRef.current = accumulateSediment(sedimentRef.current, found, 0.25);
+        addMsg(`◈ ${NODE_TYPES[found.type].label} se extinguió transmitiendo — su curvatura persiste en el campo`, "#f0d090");
+      } else {
+        addMsg(`− ${NODE_TYPES[found.type].label} eliminado — huella breve en el campo`, "#e87a7a");
+      }
       nodesRef.current = nodesRef.current.filter(n => n.id !== found.id);
       hoverRef.current = null;
       setHoveredId(null);
-      setHistory(h => [...h, { action: "remove", type: found.type }]);
+      setHistory(h => [...h, { action: "remove", type: found.type, transmitted: found.willTransmit }]);
     }
   };
 
+  // ─── ACCIONES ───────────────────────────────────────────────────────────────
   const reset = () => {
     clearTimeout(timerRef.current);
     enrichIdx.current = 0;
+    ciTimerRef.current = 0;
+    lastCIPairRef.current = null;
+    emergenceRef.current = null;
     nodesRef.current = INIT.map(n => ({ ...n }));
     ghostsRef.current = [];
+    sedimentRef.current = makeSediment();
     setHistory([]);
+    setMsgLog([]);
+    setEmergenceActive(false);
+    setCiProgress(0);
+    setTransmitMode(false);
+    addMsg("↺ Campo restablecido — estado virgen", "#7ab8e8");
+  };
+
+  const resetVirgen = () => {
+    clearTimeout(timerRef.current);
+    enrichIdx.current = 0;
+    ciTimerRef.current = 0;
+    lastCIPairRef.current = null;
+    emergenceRef.current = null;
+    nodesRef.current = [];
+    ghostsRef.current = [];
+    sedimentRef.current = makeSediment();
+    setHistory([]);
+    setMsgLog([]);
+    setEmergenceActive(false);
+    setCiProgress(0);
+    setTransmitMode(false);
+    addMsg("◌ Campo virgen — sin nodos, sin sedimentación", "#8888aa");
   };
 
   const devastate = () => {
@@ -406,6 +699,7 @@ export default function App() {
     const removeNext = () => {
       if (i >= victims.length) {
         setHistory(h => [...h, { action: "devastate", prev, eliminated: toEliminate }]);
+        addMsg(`⚠ Devastación — ${toEliminate} conciencias extintas. El campo no colapsa, pero se empobrece`, "#e87a7a");
         return;
       }
       const id = victims[i++];
@@ -429,169 +723,307 @@ export default function App() {
     addNext();
   };
 
+  const toggleTransmitMode = () => {
+    const next = !transmitMode;
+    setTransitMode(next);
+    if (next) {
+      addMsg("◈ Modo transmisión activo — clic sobre un nodo para marcarlo", "#f0d090");
+    }
+  };
+
+  // Fix typo helper
+  const setTransitMode = (v) => {
+    setTransmitMode(v);
+    transmitModeRef.current = v;
+  };
+
+  // ─── HELPERS UI ─────────────────────────────────────────────────────────────
   const rc = (r) => r >= 75 ? "#e8c87a" : r >= 45 ? "#7ab8e8" : r >= 20 ? "#e87a9a" : "#443344";
   const rl = (r) => r >= 75 ? "Campo Rico" : r >= 45 ? "Campo Moderado" : r >= 20 ? "Campo Empobrecido" : "Campo Estéril";
+  const sc = (s) => s >= 60 ? "#f0d58a" : s >= 30 ? "#b6d2f2" : s >= 10 ? "#8fa8e6" : "#7e8fc8";
+  const sl2 = (s) => s >= 60 ? "Sedimentación Densa" : s >= 30 ? "Sedimentación Media" : s >= 10 ? "Sedimentación Leve" : "Campo Virgen";
+
+  const CANVAS_MAX = 820;
 
   return (
     <div style={{
       minHeight: "100vh", background: "#06060e", color: "#d0cfe8",
       fontFamily: "'Courier New', monospace",
       display: "flex", flexDirection: "column", alignItems: "center",
-      padding: "22px 14px",
+      padding: "16px 12px",
     }}>
-      <div style={{ textAlign: "center", marginBottom: 18 }}>
-        <div style={{ fontSize: 9, letterSpacing: 4, color: "#8888aa", marginBottom: 5 }}>
-          MODELO VECTORIAL DE LA CONCIENCIA
+
+      {/* ── CABECERA ── */}
+      <div style={{ textAlign: "center", marginBottom: 12, width: "100%", maxWidth: CANVAS_MAX }}>
+        <div style={{ fontSize: 9, letterSpacing: 4, color: "#8888aa", marginBottom: 4 }}>
+          MODELO VECTORIAL DE LA CONCIENCIA · v2
         </div>
         <h1 style={{ fontSize: 20, fontWeight: 700, color: "#f0eeff", margin: 0, letterSpacing: 1 }}>
           Geometría del Campo de Conciencia
         </h1>
-        <p style={{ fontSize: 12, color: "#7070a0", marginTop: 8, lineHeight: 1.45 }}>
-          Clic para añadir nodo · Arrastra para mover · Clic derecho para eliminar
-        </p>
+        {/* Instrucciones + log narrativo en una sola línea */}
+        <div style={{
+          marginTop: 6, minHeight: 18,
+          fontSize: 11, color: "#7070a0", lineHeight: 1.4,
+        }}>
+          {msgLog.length > 0
+            ? <span style={{ color: msgLog[msgLog.length - 1].color, letterSpacing: 0.5 }}>
+                {msgLog[msgLog.length - 1].text}
+              </span>
+            : <span>
+                Clic: añadir nodo · Arrastra: mover · Clic derecho: eliminar
+                {transmitMode && <span style={{ color: "#f0d090" }}> · Modo transmisión activo</span>}
+              </span>
+          }
+        </div>
       </div>
 
-      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap", justifyContent: "center" }}>
-        <div style={{ position: "relative" }}>
-          <canvas
-            ref={canvasRef} width={W} height={H}
-            style={{
-              borderRadius: 8, border: "1px solid #14142e",
-              cursor: hoveredId ? "grab" : "crosshair",
-              display: "block", maxWidth: "100%",
-            }}
-            onMouseDown={onMouseDown}
-            onMouseMove={onMouseMove}
-            onMouseUp={onMouseUp}
-            onMouseLeave={onMouseUp}
-            onContextMenu={onContextMenu}
-          />
-          <div style={{
-            position: "absolute", bottom: 10, left: 10,
-            background: "rgba(6,6,14,0.9)",
-            border: `1px solid ${rc(stats.richness)}44`,
-            borderRadius: 5, padding: "5px 10px",
-          }}>
-            <span style={{ fontSize: 9, color: rc(stats.richness), letterSpacing: 2 }}>
-              {rl(stats.richness).toUpperCase()}
-            </span>
+      {/* ── CANVAS ── */}
+      <div style={{ position: "relative", width: "100%", maxWidth: CANVAS_MAX }}>
+        <canvas
+          ref={canvasRef} width={W} height={H}
+          style={{
+            borderRadius: 8,
+            border: `1px solid ${transmitMode ? "#f0d09055" : "#14142e"}`,
+            cursor: hoveredId ? (transmitMode ? "pointer" : "grab") : "crosshair",
+            display: "block", width: "100%",
+            transition: "border-color 0.3s",
+          }}
+          onMouseDown={onMouseDown}
+          onMouseMove={onMouseMove}
+          onMouseUp={onMouseUp}
+          onMouseLeave={onMouseUp}
+          onContextMenu={onContextMenu}
+        />
+
+        {/* Indicador campo — esquina inf izq */}
+        <div style={{
+          position: "absolute", bottom: 10, left: 10,
+          background: "rgba(6,6,14,0.88)",
+          border: `1px solid ${rc(stats.richness)}33`,
+          borderRadius: 5, padding: "4px 9px",
+        }}>
+          <span style={{ fontSize: 9, color: rc(stats.richness), letterSpacing: 2 }}>
+            {rl(stats.richness).toUpperCase()}
+          </span>
+        </div>
+
+        {/* Campo en T — esquina sup izq */}
+        <div style={{
+          position: "absolute", top: 10, left: 10,
+          background: "rgba(4,6,18,0.95)",
+          border: `1px solid ${sc(sedLevel)}66`,
+          borderRadius: 5, padding: "4px 9px",
+          display: "flex", alignItems: "center", gap: 8,
+        }}>
+          <div>
+            <div style={{ fontSize: 8, color: "#c0c8ee", letterSpacing: 2 }}>CAMPO EN T</div>
+            <div style={{ fontSize: 9, color: sc(sedLevel), letterSpacing: 1 }}>{sl2(sedLevel)}</div>
+          </div>
+          <div style={{ width: 50, height: 3, borderRadius: 1, background: "#1a2142" }}>
+            <div style={{
+              height: "100%", width: `${sedLevel}%`,
+              background: `linear-gradient(90deg, #2b3d7a, ${sc(sedLevel)})`,
+              transition: "width 0.8s", borderRadius: 1,
+            }} />
           </div>
         </div>
 
-        <div style={{ width: 188, display: "flex", flexDirection: "column", gap: 10 }}>
-          <Panel title="MÉTRICAS">
-            <Metric label="Riqueza" value={`${stats.richness}%`} color={rc(stats.richness)} />
-            <Metric label="Nodos" value={nodeCount} color="#7ab8e8" />
-            <Metric label="Zonas densas" value={stats.peaks} color="#c87ae8" />
-            <div style={{ marginTop: 7, height: 4, borderRadius: 2, background: "#101028" }}>
+        {/* Interferencia constructiva — esquina inf der */}
+        {ciProgress > 2 && (
+          <div style={{
+            position: "absolute", bottom: 10, right: 10,
+            background: "rgba(6,6,14,0.92)",
+            border: "1px solid #e8c87a33",
+            borderRadius: 5, padding: "4px 9px", minWidth: 140,
+          }}>
+            <div style={{ fontSize: 8, color: "#e8c87a88", letterSpacing: 2, marginBottom: 3 }}>
+              INTERFERENCIA CONSTRUCTIVA
+            </div>
+            <div style={{ height: 3, borderRadius: 2, background: "#101028" }}>
               <div style={{
-                height: "100%", width: `${stats.richness}%`,
-                background: `linear-gradient(90deg, #182060, ${rc(stats.richness)})`,
-                transition: "width 0.4s, background 0.4s", borderRadius: 2,
+                height: "100%", width: `${ciProgress}%`,
+                background: "linear-gradient(90deg, #604020, #e8c87a)",
+                transition: "width 0.3s", borderRadius: 2,
               }} />
             </div>
-          </Panel>
+            {ciProgress > 80 && (
+              <div style={{ fontSize: 9, color: "#e8c87a", marginTop: 2 }}>↑ emergencia inminente</div>
+            )}
+          </div>
+        )}
+      </div>
 
-          <Panel title="AÑADIR NODO">
+      {/* ── BARRA DE CONTROLES HORIZONTAL ── */}
+      <div style={{
+        width: "100%", maxWidth: CANVAS_MAX,
+        marginTop: 8,
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr 1fr 1fr",
+        gap: 8,
+      }}>
+
+        {/* COL 1 — Métricas */}
+        <MiniPanel title="MÉTRICAS">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2px 8px" }}>
+            <MiniMetric label="Riqueza"    value={`${stats.richness}%`} color={rc(stats.richness)} />
+            <MiniMetric label="Nodos"      value={nodeCount}             color="#7ab8e8" />
+            <MiniMetric label="Densas"     value={stats.peaks}           color="#c87ae8" />
+            <MiniMetric label="Sedim."     value={`${sedLevel}%`}        color={sc(sedLevel)} />
+          </div>
+          <div style={{ marginTop: 6, height: 3, borderRadius: 2, background: "#101028" }}>
+            <div style={{
+              height: "100%", width: `${stats.richness}%`,
+              background: `linear-gradient(90deg, #182060, ${rc(stats.richness)})`,
+              transition: "width 0.4s", borderRadius: 2,
+            }} />
+          </div>
+        </MiniPanel>
+
+        {/* COL 2 — Tipo de nodo */}
+        <MiniPanel title="AÑADIR NODO">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3 }}>
             {Object.entries(NODE_TYPES).map(([key, def]) => (
               <button key={key} onClick={() => setSelectedType(key)} style={{
-                display: "block", width: "100%", textAlign: "left",
-                padding: "6px 8px", marginBottom: 4, borderRadius: 4,
+                padding: "5px 6px", borderRadius: 4, textAlign: "left",
                 border: `1px solid ${selectedType === key ? def.color + "77" : "#14142e"}`,
-                background: selectedType === key ? `${def.color}12` : "transparent",
-                color: selectedType === key ? def.color : "#8888aa",
-                fontSize: 9, cursor: "pointer", transition: "all 0.2s",
+                background: selectedType === key ? `${def.color}14` : "transparent",
+                color: selectedType === key ? def.color : "#7070a0",
+                fontSize: 10, cursor: "pointer", transition: "all 0.2s",
+                display: "flex", alignItems: "center", gap: 5,
               }}>
                 <span style={{
-                  marginRight: 6, display: "inline-block",
-                  width: 6, height: 6, borderRadius: "50%", background: def.color,
-                  verticalAlign: "middle",
+                  width: 6, height: 6, borderRadius: "50%",
+                  background: def.color, flexShrink: 0,
                   boxShadow: selectedType === key ? `0 0 5px ${def.color}` : "none",
                 }} />
                 {def.label}
               </button>
             ))}
-          </Panel>
-
-          <Panel title="ACCIONES">
-            <ABtn label="✦  Enriquecer Campo" onClick={enrich} color="#e8c87a" />
-            <ABtn label="↺  Restablecer" onClick={reset} color="#7ab8e8" />
-            <ABtn label="⚠  Simular Genocidio" onClick={devastate} color="#e87a7a" />
-          </Panel>
-
-          {history.length > 0 && (
-            <Panel title="HISTORIAL">
-              <div style={{ maxHeight: 120, overflowY: "auto" }}>
-                {[...history].reverse().slice(0, 10).map((h, i) => {
-                  const neg = h.action === "remove" || h.action === "devastate";
-                  return (
-                    <div key={i} style={{
-                      fontSize: 9, color: "#8888aa", marginBottom: 3,
-                      borderLeft: `2px solid ${neg ? "#e87a7a" : "#7ab8e8"}88`,
-                      paddingLeft: 5,
-                    }}>
-                      {h.action === "add"       && `+ ${NODE_TYPES[h.type]?.label}`}
-                      {h.action === "remove"    && `− ${NODE_TYPES[h.type]?.label}`}
-                      {h.action === "devastate" && `⚠ −${h.eliminated} conciencias (${Math.round(h.eliminated/h.prev*100)}%)`}
-                    </div>
-                  );
-                })}
-              </div>
-            </Panel>
-          )}
-        </div>
-      </div>
-
-      <div style={{ marginTop: 14, display: "flex", gap: 14, flexWrap: "wrap", justifyContent: "center" }}>
-        {[
-          ["#08080f", "Campo estéril"],
-          ["#182060", "Baja densidad"],
-          ["#305090", "Densidad media"],
-          ["#7090b8", "Alta densidad"],
-          ["#c8c8da", "Interferencia constructiva"],
-        ].map(([c, l]) => (
-          <div key={l} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#7070a0" }}>
-            <div style={{ width: 11, height: 11, borderRadius: 2, background: c, border: "1px solid #14142e", flexShrink: 0 }} />
-            {l}
           </div>
-        ))}
+        </MiniPanel>
+
+        {/* COL 3 — Acciones principales */}
+        <MiniPanel title="ACCIONES">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3 }}>
+            <ABtn label="✦ Enriquecer"  onClick={enrich}       color="#e8c87a" small />
+            <ABtn label="↺ Restablecer" onClick={reset}        color="#7ab8e8" small />
+            <ABtn label="◌ Virgen"      onClick={resetVirgen}  color="#8888aa" small />
+            <ABtn
+              label={transmitMode ? "◈ Salir Trans." : "◈ Transmisión"}
+              onClick={toggleTransmitMode}
+              color="#f0d090"
+              active={transmitMode}
+              small
+            />
+          </div>
+          <div style={{ marginTop: 3 }}>
+            <ABtn label="⚠  Simular Devastación" onClick={devastate} color="#e87a7a" small />
+          </div>
+        </MiniPanel>
+
+        {/* COL 4 — Emergencia nodal + historial o instrucción transmisión */}
+        <MiniPanel title={transmitMode ? "TRANSMISIÓN" : "EMERGENCIA NODAL"}>
+          {transmitMode ? (
+            <div style={{ fontSize: 10, color: "#9090a8", lineHeight: 1.6 }}>
+              <span style={{ color: "#f0d090" }}>◈ Modo activo.</span> Clic sobre un nodo para marcarlo.
+              Al eliminarlo (clic der.) su curvatura persiste más tiempo.
+              <div style={{ marginTop: 5, fontSize: 9, color: "#f0d09055" }}>
+                ○ Sin marca → huella breve &nbsp;·&nbsp; ◈ marcado → legado
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 10, color: "#9090a8", lineHeight: 1.6 }}>
+              Dos nodos humanos en interferencia constructiva sostenida
+              generan una nueva conciencia.
+              <div style={{ marginTop: 5, height: 2, borderRadius: 1, background: "#101028" }}>
+                <div style={{
+                  height: "100%", width: `${ciProgress}%`,
+                  background: "linear-gradient(90deg, #604020, #e8c87a)",
+                  borderRadius: 1, transition: "width 0.3s",
+                }} />
+              </div>
+              <div style={{ fontSize: 9, color: "#e8c87a55", marginTop: 2 }}>
+                {ciProgress > 0 ? `${ciProgress}% — activa` : "sin par detectado"}
+              </div>
+            </div>
+          )}
+          {/* Historial compacto */}
+          {history.length > 0 && (
+            <div style={{ marginTop: 6, borderTop: "1px solid #14142e", paddingTop: 5 }}>
+              {[...history].reverse().slice(0, 4).map((h, i) => {
+                const isEm = h.action === "emergence";
+                const isTr = h.transmitted;
+                const neg  = h.action === "remove" || h.action === "devastate";
+                return (
+                  <div key={i} style={{
+                    fontSize: 9, color: "#6060a0", marginBottom: 2,
+                    borderLeft: `2px solid ${isEm ? "#e8c87a" : isTr ? "#f0d090" : neg ? "#e87a7a" : "#7ab8e8"}66`,
+                    paddingLeft: 4,
+                  }}>
+                    {h.action === "add"       && `+ ${NODE_TYPES[h.type]?.label}`}
+                    {h.action === "remove"    && `${isTr ? "◈" : "−"} ${NODE_TYPES[h.type]?.label}`}
+                    {h.action === "emergence" && `↑ Emergió: ${NODE_TYPES[h.type]?.label}`}
+                    {h.action === "devastate" && `⚠ −${h.eliminated} nodos`}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </MiniPanel>
       </div>
 
-      <div style={{ marginTop: 12, fontSize: 12, color: "#5a5a7a", textAlign: "center", maxWidth: 620, lineHeight: 1.85 }}>
-        Cada nodo oscila orgánicamente manifestando su relación y simbiosis con el campo colectivo.
-        La destrucción masiva de nodos empobrece la topografía disponible para futuras emergencias conscientes.
-        <div style={{ marginTop: 8, fontSize: 10, color: "#7a7aa8", lineHeight: 1.7 }}>
-          Si quieres saber mas sobre el tema y libros, da click{" "}
-          <a
-            href="https://www.amazon.com/author/s_angeloz"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: "#c8c8da" }}
-          >
-            aqui
-          </a>
-          .
+      {/* ── LEYENDA + PIE ── */}
+      <div style={{
+        width: "100%", maxWidth: CANVAS_MAX, marginTop: 8,
+        display: "flex", justifyContent: "space-between", alignItems: "flex-end",
+        flexWrap: "wrap", gap: 8,
+      }}>
+        {/* Leyenda colores */}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {[
+            ["#08080f", "Estéril"],
+            ["#182060", "Baja densidad"],
+            ["#305090", "Media"],
+            ["#7090b8", "Alta densidad"],
+            ["#c8c8da", "Interferencia"],
+            ["#f0d090", "Legado"],
+          ].map(([c, l]) => (
+            <div key={l} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, color: "#606080" }}>
+              <div style={{ width: 9, height: 9, borderRadius: 2, background: c, border: "1px solid #14142e", flexShrink: 0 }} />
+              {l}
+            </div>
+          ))}
         </div>
-        <div style={{ marginTop: 8, fontSize: 9, color: "#5a5a7a", lineHeight: 1.7 }}>
-          Serge Angeloz · Copyright abril 2026 ·{" "}
-          <a
-            href="https://www.amazon.com/author/s_angeloz"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: "#9090b8" }}
-          >
-            Pagina de autor
-          </a>
+
+        {/* Pie */}
+        <div style={{ fontSize: 10, color: "#454560", textAlign: "right", lineHeight: 1.6 }}>
+          Serge Angéloz · Copyright abril 2026 ·{" "}
+          <a href="https://www.amazon.com/author/s_angeloz" target="_blank" rel="noopener noreferrer"
+            style={{ color: "#7070a0" }}>Página de autor</a>
         </div>
       </div>
     </div>
   );
 }
 
+// ─── COMPONENTES UI ───────────────────────────────────────────────────────────
 function Panel({ title, children }) {
   return (
     <div style={{ background: "#0a0a1c", border: "1px solid #14142e", borderRadius: 7, padding: 12 }}>
       <div style={{ fontSize: 8, color: "#8888aa", letterSpacing: 3, marginBottom: 9 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function MiniPanel({ title, children }) {
+  return (
+    <div style={{
+      background: "#0a0a1c", border: "1px solid #14142e",
+      borderRadius: 7, padding: "10px 12px",
+    }}>
+      <div style={{ fontSize: 8, color: "#8888aa", letterSpacing: 3, marginBottom: 7 }}>{title}</div>
       {children}
     </div>
   );
@@ -606,16 +1038,32 @@ function Metric({ label, value, color }) {
   );
 }
 
-function ABtn({ label, onClick, color }) {
+function MiniMetric({ label, value, color }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "2px 0" }}>
+      <span style={{ fontSize: 9, color: "#7070a0" }}>{label}</span>
+      <span style={{ fontSize: 11, color, fontWeight: 700 }}>{value}</span>
+    </div>
+  );
+}
+
+function ABtn({ label, onClick, color, active = false, small = false }) {
   const [h, setH] = useState(false);
   return (
-    <button onClick={onClick} onMouseEnter={() => setH(true)} onMouseLeave={() => setH(false)} style={{
-      display: "block", width: "100%", padding: "6px 8px", marginBottom: 4,
-      borderRadius: 4, border: `1px solid ${color}${h ? "66" : "22"}`,
-      background: h ? `${color}1a` : `${color}08`,
-      color: h ? color : color + "cc",
-      fontSize: 9, cursor: "pointer", textAlign: "left", transition: "all 0.2s",
-    }}>
+    <button onClick={onClick}
+      onMouseEnter={() => setH(true)}
+      onMouseLeave={() => setH(false)}
+      style={{
+        display: "block", width: "100%",
+        padding: small ? "5px 6px" : "6px 8px",
+        marginBottom: small ? 0 : 4,
+        borderRadius: 4,
+        border: `1px solid ${color}${(h || active) ? "66" : "22"}`,
+        background: (h || active) ? `${color}1a` : `${color}08`,
+        color: (h || active) ? color : color + "cc",
+        fontSize: small ? 9 : 10,
+        cursor: "pointer", textAlign: "left", transition: "all 0.2s",
+      }}>
       {label}
     </button>
   );
