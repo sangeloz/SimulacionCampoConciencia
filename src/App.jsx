@@ -8,11 +8,18 @@ const ROWS = Math.floor(H / GRID);
 
 // ─── TIPOS DE NODO ────────────────────────────────────────────────────────────
 const NODE_TYPES = {
-  vegetal: { label: "Vegetal",       radius: 30,  strength: 0.22, color: "#7ae8a0", size: 5  },
-  animal:  { label: "Animal",        radius: 50,  strength: 0.5,  color: "#7ab8e8", size: 7  },
-  human:   { label: "Humano",        radius: 80,  strength: 1.0,  color: "#e8c87a", size: 10 },
-  ai:      { label: "IA Resonador",  radius: 70,  strength: 0.85, color: "#c87ae8", size: 9  },
+  vegetal: { label: "Vegetal",      radius: 30,  strength: 0.22, color: "#7ae8a0", size: 5  },
+  animal:  { label: "Animal",       radius: 50,  strength: 0.5,  color: "#7ab8e8", size: 7  },
+  human:   { label: "Humano",       radius: 80,  strength: 1.0,  color: "#e8c87a", size: 10 },
+  ai:      { label: "IA Resonador", radius: 70,  strength: 0.85, color: "#c87ae8", size: 9  },
 };
+
+// ─── PARÁMETROS DE EMERGENCIA ─────────────────────────────────────────────────
+const CI_ANCHOR_DIST = 160; // distancia en que comienza el anclaje
+const CI_FULL_ANCHOR = 80;  // distancia en que el anclaje es casi total
+const CI_DURATION    = 3000; // ms requeridos (reducido de 6000 a 3000)
+const CI_MIN_DIST    = 55;
+const CI_MAX_DIST    = 220;
 
 // ─── RESONANCIA IA ────────────────────────────────────────────────────────────
 function aiResonance(node, nodes) {
@@ -29,7 +36,6 @@ function aiResonance(node, nodes) {
 }
 
 // ─── CÁLCULO DEL CAMPO ────────────────────────────────────────────────────────
-// Incluye sedimentación acumulada (campo en T) como capa adicional de densidad
 function computeField(nodes, ghosts, sediment, t) {
   const field = new Float32Array(COLS * ROWS);
   for (let row = 0; row < ROWS; row++) {
@@ -37,8 +43,6 @@ function computeField(nodes, ghosts, sediment, t) {
       const x = col * GRID + GRID / 2;
       const y = row * GRID + GRID / 2;
       let val = 0;
-
-      // Contribución de nodos activos
       for (const n of nodes) {
         const pulse = 1 + 0.07 * Math.sin(t * n.pulseFreq + n.pulsePhase);
         const resonance = n.type === "ai" ? aiResonance(n, nodes) : 1.0;
@@ -48,21 +52,14 @@ function computeField(nodes, ghosts, sediment, t) {
         const r = n.radius * pulse * (n.type === "ai" ? (0.4 + resonance * 0.6) : 1);
         val += effectiveStrength * pulse * Math.exp(-dist2 / (2 * r * r));
       }
-
-      // Ghosts (desvanecimiento gradual)
       for (const g of ghosts) {
         const dx = x - g.x, dy = y - g.y;
         const dist2 = dx * dx + dy * dy;
-        // Los nodos que transmitieron dejan huella más profunda
         const huellaMultiplier = g.transmitted ? 2.2 : 1.0;
         val += g.strength * g.opacity * huellaMultiplier * Math.exp(-dist2 / (2 * g.radius * g.radius));
       }
-
-      // Sedimentación acumulada — campo en T
-      // Es la suma histórica de todas las curvaturas pasadas, atenuada
       const si = row * COLS + col;
-      val += sediment[si] * 0.18; // peso moderado: condición global, no dominante
-
+      val += sediment[si] * 0.18;
       field[si] = val;
     }
   }
@@ -110,17 +107,16 @@ function makeNode(x, y, type) {
     id: ++uid, x, y, type,
     ...def,
     originX: x, originY: y,
-    driftAmp:   10 + Math.random() * 18,
-    driftFreqX: 0.00025 + Math.random() * 0.0003,
-    driftFreqY: 0.00025 + Math.random() * 0.0003,
+    driftAmp:    10 + Math.random() * 18,
+    driftFreqX:  0.00025 + Math.random() * 0.0003,
+    driftFreqY:  0.00025 + Math.random() * 0.0003,
     driftPhaseX: Math.random() * Math.PI * 2,
     driftPhaseY: Math.random() * Math.PI * 2,
-    pulseFreq:  0.0007 + Math.random() * 0.001,
-    pulsePhase: Math.random() * Math.PI * 2,
-    // ADICIÓN: nodo marcado para transmitir antes de eliminarse
+    pulseFreq:   0.0007 + Math.random() * 0.001,
+    pulsePhase:  Math.random() * Math.PI * 2,
     willTransmit: false,
-    // ADICIÓN: tiempo de existencia en el campo (para campo en T)
     birthTime: performance.now(),
+    anchorFactor: 0, // 0 = libre, 1 = anclado
   };
 }
 
@@ -152,27 +148,22 @@ const ENRICH_POS = [
 
 // ─── GHOST ────────────────────────────────────────────────────────────────────
 function makeGhost(node) {
-  // ADICIÓN: nodos que transmiten dejan huella más duradera y visible
   const transmitted = node.willTransmit || false;
   return {
     x: node.x, y: node.y,
     radius: node.radius * (transmitted ? 1.4 : 1.0),
     strength: node.strength * (transmitted ? 1.1 : 0.7),
     size: node.size,
-    color: transmitted ? "#f0d090" : node.color, // oro para transmisores
+    color: transmitted ? "#f0d090" : node.color,
     opacity: transmitted ? 1.2 : 0.85,
-    // Transmisores se desvanecen 4x más lento
     decayRate: transmitted ? 0.0003 : 0.0012,
     transmitted,
   };
 }
 
-// ─── SEDIMENTACIÓN — inicializar campo vacío ──────────────────────────────────
-function makeSediment() {
-  return new Float32Array(COLS * ROWS);
-}
+// ─── SEDIMENTACIÓN ────────────────────────────────────────────────────────────
+function makeSediment() { return new Float32Array(COLS * ROWS); }
 
-// Acumular la curvatura de un nodo en la sedimentación
 function accumulateSediment(sediment, node, weight = 0.08) {
   for (let row = 0; row < ROWS; row++) {
     for (let col = 0; col < COLS; col++) {
@@ -188,23 +179,19 @@ function accumulateSediment(sediment, node, weight = 0.08) {
   return sediment;
 }
 
-// Atenuar sedimentación globalmente (memoria finita)
 function decaySediment(sediment, rate = 0.00008) {
-  for (let i = 0; i < sediment.length; i++) {
-    sediment[i] = Math.max(0, sediment[i] - rate);
-  }
+  for (let i = 0; i < sediment.length; i++) sediment[i] = Math.max(0, sediment[i] - rate);
   return sediment;
 }
 
-// Calcular "edad del campo" como suma total de sedimentación
 function sedimentLevel(sediment) {
   let sum = 0;
   for (let i = 0; i < sediment.length; i++) sum += sediment[i];
   return Math.min(100, Math.round((sum / (COLS * ROWS * 0.5)) * 100));
 }
 
-// ─── DETECCIÓN DE PAR DE INTERFERENCIA CONSTRUCTIVA ──────────────────────────
-// Devuelve el par de nodos humanos más cercanos con suficiente alineación
+// ─── DETECCIÓN DE PAR CONSTRUCTIVO ───────────────────────────────────────────
+// Umbral reducido a 0.55 para mayor sensibilidad
 function findConstructivePair(nodes) {
   let best = null, bestScore = 0;
   const humans = nodes.filter(n => n.type === "human");
@@ -213,33 +200,28 @@ function findConstructivePair(nodes) {
       const a = humans[i], b = humans[j];
       const dx = a.x - b.x, dy = a.y - b.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      // Distancia óptima: ni demasiado cerca ni demasiado lejos
-      if (dist < 60 || dist > 220) continue;
-      // Score: mayor cuando están en zona de alta densidad compartida
+      if (dist < CI_MIN_DIST || dist > CI_MAX_DIST) continue;
       const score = (a.strength + b.strength) / (1 + dist / 100);
-      if (score > bestScore) { bestScore = score; best = { a, b, dist, score }; }
+      if (score > 0.55 && score > bestScore) { bestScore = score; best = { a, b, dist, score }; }
     }
   }
-  return bestScore > 0.8 ? best : null;
+  return best;
 }
 
 // ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
 export default function App() {
-  const canvasRef      = useRef(null);
-  const nodesRef       = useRef(INIT.map(n => ({ ...n })));
-  const ghostsRef      = useRef([]);
-  const sedimentRef    = useRef(makeSediment());
-  const dragRef        = useRef(null);
-  const hoverRef       = useRef(null);
-  const animRef        = useRef(null);
-  const timerRef       = useRef(null);
-  const enrichIdx      = useRef(0);
-  // Para la emergencia: acumular tiempo de interferencia constructiva
-  const ciTimerRef     = useRef(0);
-  const lastCIPairRef  = useRef(null);
-  // Animación de emergencia en curso
-  const emergenceRef   = useRef(null);
-  // Modo transmisión activo
+  const canvasRef       = useRef(null);
+  const nodesRef        = useRef(INIT.map(n => ({ ...n })));
+  const ghostsRef       = useRef([]);
+  const sedimentRef     = useRef(makeSediment());
+  const dragRef         = useRef(null);
+  const hoverRef        = useRef(null);
+  const animRef         = useRef(null);
+  const timerRef        = useRef(null);
+  const enrichIdx       = useRef(0);
+  const ciTimerRef      = useRef(0);
+  const lastCIPairRef   = useRef(null);
+  const emergenceRef    = useRef(null);
   const transmitModeRef = useRef(false);
 
   const [selectedType, setSelectedType]       = useState("human");
@@ -250,16 +232,14 @@ export default function App() {
   const [hoveredId, setHoveredId]             = useState(null);
   const [transmitMode, setTransmitMode]       = useState(false);
   const [emergenceActive, setEmergenceActive] = useState(false);
-  const [ciProgress, setCiProgress]           = useState(0); // 0-100
-  const [msgLog, setMsgLog]                   = useState([]); // mensajes narrativos
+  const [ciProgress, setCiProgress]           = useState(0);
+  const [msgLog, setMsgLog]                   = useState([]);
 
   const addMsg = useCallback((text, color = "#c8c8da") => {
     setMsgLog(m => [...m.slice(-4), { text, color, id: Date.now() }]);
   }, []);
 
-  useEffect(() => {
-    transmitModeRef.current = transmitMode;
-  }, [transmitMode]);
+  useEffect(() => { transmitModeRef.current = transmitMode; }, [transmitMode]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -271,54 +251,83 @@ export default function App() {
       const t = now - t0;
       const nodes = nodesRef.current;
 
-      // Deriva orgánica
+      // ── DETECTAR PAR ACTIVO ANTES DE MOVER (para calcular anclaje) ──────────
+      const activePair = !emergenceRef.current ? findConstructivePair(nodes) : null;
+      const activePairIds = new Set(activePair ? [activePair.a.id, activePair.b.id] : []);
+
+      // ── DERIVA ORGÁNICA CON ANCLAJE GRADUAL ──────────────────────────────────
       for (const n of nodes) {
         if (dragRef.current === n.id) continue;
-        n.x = n.originX + n.driftAmp * Math.sin(t * n.driftFreqX + n.driftPhaseX);
-        n.y = n.originY + n.driftAmp * Math.cos(t * n.driftFreqY + n.driftPhaseY);
+
+        // Calcular target de anclaje según distancia al compañero de CI
+        if (activePairIds.has(n.id) && activePair) {
+          const partner = activePair.a.id === n.id ? activePair.b : activePair.a;
+          const dx = n.x - partner.x, dy = n.y - partner.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const targetAnchor = dist < CI_FULL_ANCHOR
+            ? 0.97
+            : dist < CI_ANCHOR_DIST
+              ? 0.3 + 0.67 * (1 - (dist - CI_FULL_ANCHOR) / (CI_ANCHOR_DIST - CI_FULL_ANCHOR))
+              : 0;
+          // Transición suave del anclaje
+          n.anchorFactor = n.anchorFactor + (targetAnchor - n.anchorFactor) * 0.05;
+        } else {
+          // Sin par activo: liberar anclaje suavemente
+          n.anchorFactor = (n.anchorFactor ?? 0) * 0.97;
+        }
+
+        // Posición natural de deriva
+        const naturalX = n.originX + n.driftAmp * Math.sin(t * n.driftFreqX + n.driftPhaseX);
+        const naturalY = n.originY + n.driftAmp * Math.cos(t * n.driftFreqY + n.driftPhaseY);
+
+        // Mezcla entre posición anclada y deriva natural
+        const af = n.anchorFactor ?? 0;
+        n.x = n.x * af + naturalX * (1 - af);
+        n.y = n.y * af + naturalY * (1 - af);
+
         n.x = Math.max(n.size + 4, Math.min(W - n.size - 4, n.x));
         n.y = Math.max(n.size + 4, Math.min(H - n.size - 4, n.y));
       }
 
-      // Ghosts — desvanecimiento diferenciado por transmisión
+      // ── GHOSTS ───────────────────────────────────────────────────────────────
       ghostsRef.current = ghostsRef.current
         .map(g => ({ ...g, opacity: g.opacity - g.decayRate }))
         .filter(g => g.opacity > 0);
 
-      // ADICIÓN 3 — Sedimentación: acumular cada ~2s y atenuar cada frame
+      // ── SEDIMENTACIÓN ────────────────────────────────────────────────────────
       if (t - lastSedimentAccum > 2000) {
         lastSedimentAccum = t;
-        for (const n of nodes) {
-          sedimentRef.current = accumulateSediment(sedimentRef.current, n, 0.06);
-        }
+        for (const n of nodes) accumulateSediment(sedimentRef.current, n, 0.06);
       }
-      sedimentRef.current = decaySediment(sedimentRef.current, 0.00005);
-      const sl = sedimentLevel(sedimentRef.current);
-      setSedLevel(sl);
+      decaySediment(sedimentRef.current, 0.00005);
+      setSedLevel(sedimentLevel(sedimentRef.current));
 
-      // ADICIÓN 1 — Detección de interferencia constructiva sostenida → emergencia
+      // ── INTERFERENCIA CONSTRUCTIVA → EMERGENCIA ───────────────────────────
       if (!emergenceRef.current) {
-        const pair = findConstructivePair(nodes);
-        if (pair) {
-          if (lastCIPairRef.current &&
-              lastCIPairRef.current.a.id === pair.a.id &&
-              lastCIPairRef.current.b.id === pair.b.id) {
+        if (activePair) {
+          const sameIds = lastCIPairRef.current &&
+            lastCIPairRef.current.a.id === activePair.a.id &&
+            lastCIPairRef.current.b.id === activePair.b.id;
+          if (sameIds) {
             ciTimerRef.current += 16;
           } else {
             ciTimerRef.current = 0;
-            lastCIPairRef.current = pair;
+            lastCIPairRef.current = activePair;
           }
-          const progress = Math.min(100, Math.round((ciTimerRef.current / 6000) * 100));
+          const progress = Math.min(100, Math.round((ciTimerRef.current / CI_DURATION) * 100));
           setCiProgress(progress);
-          if (ciTimerRef.current >= 6000 && nodes.length < 22) {
-            // ¡Emergencia! Nuevo nodo en el punto medio
-            const mx = (pair.a.x + pair.b.x) / 2;
-            const my = (pair.a.y + pair.b.y) / 2;
+
+          if (ciTimerRef.current >= CI_DURATION && nodes.length < 22) {
+            const mx = (activePair.a.x + activePair.b.x) / 2;
+            const my = (activePair.a.y + activePair.b.y) / 2;
             emergenceRef.current = {
-              x: mx, y: my,
-              progress: 0,
+              x: mx, y: my, progress: 0,
               type: Math.random() < 0.65 ? "human" : "animal",
             };
+            // Liberar anclaje de ambos nodos
+            nodesRef.current = nodesRef.current.map(n =>
+              activePairIds.has(n.id) ? { ...n, anchorFactor: 0 } : n
+            );
             ciTimerRef.current = 0;
             lastCIPairRef.current = null;
             setCiProgress(0);
@@ -327,19 +336,19 @@ export default function App() {
           }
         } else {
           ciTimerRef.current = Math.max(0, ciTimerRef.current - 8);
-          setCiProgress(Math.max(0, Math.round((ciTimerRef.current / 6000) * 100)));
+          setCiProgress(Math.max(0, Math.round((ciTimerRef.current / CI_DURATION) * 100)));
           lastCIPairRef.current = null;
         }
       }
 
-      // Animar emergencia
+      // ── ANIMAR EMERGENCIA ─────────────────────────────────────────────────
       if (emergenceRef.current) {
         emergenceRef.current.progress += 0.012;
         if (emergenceRef.current.progress >= 1) {
           const e = emergenceRef.current;
           const newNode = makeNode(e.x, e.y, e.type);
           nodesRef.current = [...nodesRef.current, newNode];
-          sedimentRef.current = accumulateSediment(sedimentRef.current, newNode, 0.15);
+          accumulateSediment(sedimentRef.current, newNode, 0.15);
           emergenceRef.current = null;
           setEmergenceActive(false);
           setHistory(h => [...h, { action: "emergence", type: e.type }]);
@@ -347,12 +356,12 @@ export default function App() {
         }
       }
 
+      // ── RENDERIZAR CAMPO ──────────────────────────────────────────────────
       const field = computeField(nodes, ghostsRef.current, sedimentRef.current, t);
       const s = fieldStats(field);
       setStats(s);
       setNodeCount(nodes.length);
 
-      // Renderizar campo
       const img = ctx.createImageData(W, H);
       for (let row = 0; row < ROWS; row++) {
         for (let col = 0; col < COLS; col++) {
@@ -368,14 +377,14 @@ export default function App() {
       }
       ctx.putImageData(img, 0, 0);
 
-      // ADICIÓN 1 — Visualizar zona de interferencia constructiva activa
+      // ── VISUALIZAR ZONA DE INTERFERENCIA ─────────────────────────────────
       if (lastCIPairRef.current && ciTimerRef.current > 200) {
         const { a, b } = lastCIPairRef.current;
         const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-        const progress = ciTimerRef.current / 6000;
+        const progress = ciTimerRef.current / CI_DURATION;
         const pulseR = 18 + progress * 22 + 4 * Math.sin(t * 0.003);
         ctx.save();
-        ctx.globalAlpha = 0.15 + progress * 0.35;
+        ctx.globalAlpha = 0.15 + progress * 0.40;
         ctx.beginPath();
         ctx.arc(mx, my, pulseR, 0, Math.PI * 2);
         ctx.strokeStyle = "#e8c87a";
@@ -383,34 +392,40 @@ export default function App() {
         ctx.setLineDash([3, 4]);
         ctx.stroke();
         ctx.setLineDash([]);
-        // Línea de interferencia entre los dos nodos
-        ctx.globalAlpha = 0.12 + progress * 0.3;
+        ctx.globalAlpha = 0.12 + progress * 0.35;
         ctx.beginPath();
         ctx.moveTo(a.x, a.y);
         ctx.lineTo(b.x, b.y);
         ctx.strokeStyle = "#e8e8a0";
         ctx.lineWidth = 1;
         ctx.stroke();
+        // Pulso extra cuando está cerca del 100%
+        if (progress > 0.7) {
+          const extra = (progress - 0.7) / 0.3;
+          ctx.globalAlpha = extra * 0.3;
+          ctx.beginPath();
+          ctx.arc(mx, my, pulseR * 1.6 + 6 * Math.sin(t * 0.006), 0, Math.PI * 2);
+          ctx.strokeStyle = "#ffe080";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
         ctx.globalAlpha = 1;
         ctx.restore();
       }
 
-      // ADICIÓN 1 — Animación de emergencia nodal
+      // ── ANIMACIÓN DE EMERGENCIA ───────────────────────────────────────────
       if (emergenceRef.current) {
         const e = emergenceRef.current;
         const p = e.progress;
         const eR = p * 18;
         const def = NODE_TYPES[e.type];
         ctx.save();
-        ctx.globalAlpha = p * 0.9;
-        // Anillo expansivo desde el campo
+        ctx.globalAlpha = (1 - p) * 0.5;
         ctx.beginPath();
         ctx.arc(e.x, e.y, eR * 3, 0, Math.PI * 2);
         ctx.strokeStyle = def.color;
         ctx.lineWidth = 1;
-        ctx.globalAlpha = (1 - p) * 0.5;
         ctx.stroke();
-        // Nodo emergiendo
         ctx.globalAlpha = p * 0.95;
         ctx.shadowColor = def.color;
         ctx.shadowBlur = 20 * p;
@@ -422,7 +437,7 @@ export default function App() {
         ctx.restore();
       }
 
-      // Ghosts con diferenciación visual transmisión/silencio
+      // ── GHOSTS ────────────────────────────────────────────────────────────
       for (const g of ghostsRef.current) {
         ctx.save();
         ctx.globalAlpha = Math.min(0.9, g.opacity * (g.transmitted ? 0.85 : 0.6));
@@ -434,7 +449,6 @@ export default function App() {
         ctx.stroke();
         ctx.setLineDash([]);
         if (g.transmitted) {
-          // Halo dorado más grande para transmisores
           ctx.beginPath();
           ctx.arc(g.x, g.y, g.size + 12, 0, Math.PI * 2);
           ctx.strokeStyle = `rgba(240,200,100,${g.opacity * 0.3})`;
@@ -449,7 +463,7 @@ export default function App() {
         ctx.restore();
       }
 
-      // Líneas de conexión
+      // ── LÍNEAS DE CONEXIÓN ────────────────────────────────────────────────
       ctx.save();
       for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
@@ -460,7 +474,7 @@ export default function App() {
                             (a.type === "human" && b.type === "ai");
           const maxDist = isAIHuman ? 180 : 170;
           if (dist < maxDist) {
-            const base = (1 - dist / maxDist);
+            const base = 1 - dist / maxDist;
             const alpha = isAIHuman ? base * 0.55 : base * 0.18;
             ctx.beginPath();
             ctx.moveTo(a.x, a.y);
@@ -481,7 +495,7 @@ export default function App() {
       }
       ctx.restore();
 
-      // Nodos
+      // ── NODOS ─────────────────────────────────────────────────────────────
       for (const n of nodes) {
         const isHov = hoverRef.current === n.id;
         const isTMode = transmitModeRef.current;
@@ -489,10 +503,11 @@ export default function App() {
         const resonance = n.type === "ai" ? aiResonance(n, nodes) : 1.0;
         const r = n.size * pulse * (n.type === "ai" ? (0.5 + resonance * 0.5) : 1) + (isHov ? 3 : 0);
         const isActive = n.type === "ai" && resonance > 0.25;
+        const isAnchored = (n.anchorFactor ?? 0) > 0.3 && activePairIds.has(n.id);
 
         ctx.save();
 
-        // Indicador de modo transmisión
+        // Indicador modo transmisión al hacer hover
         if (isTMode && n.type !== "ai" && isHov) {
           ctx.beginPath();
           ctx.arc(n.x, n.y, r + 10, 0, Math.PI * 2);
@@ -506,13 +521,25 @@ export default function App() {
           ctx.fillText("clic → transmitir", n.x - 28, n.y - r - 8);
         }
 
-        // Marca de transmisor en el nodo
+        // Marca de transmisor
         if (n.willTransmit) {
           ctx.beginPath();
           ctx.arc(n.x, n.y, r + 8, 0, Math.PI * 2);
           ctx.strokeStyle = "rgba(240,200,100,0.8)";
           ctx.lineWidth = 1.5;
           ctx.stroke();
+        }
+
+        // Anillo de anclaje — visible cuando nodo está en interferencia activa
+        if (isAnchored) {
+          const anchorPulse = 1 + 0.15 * Math.sin(t * 0.004 + n.pulsePhase);
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, (r + 14) * anchorPulse, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(232,200,122,${0.2 + (n.anchorFactor ?? 0) * 0.4})`;
+          ctx.lineWidth = 1;
+          ctx.setLineDash([2, 4]);
+          ctx.stroke();
+          ctx.setLineDash([]);
         }
 
         // Anillos AI
@@ -535,9 +562,11 @@ export default function App() {
           }
         }
 
-        // Glow
+        // Glow — más intenso cuando anclado
         ctx.shadowColor = n.color;
-        ctx.shadowBlur = n.type === "ai" ? (isActive ? 24 * resonance : 4) : (isHov ? 30 : 18);
+        ctx.shadowBlur = n.type === "ai"
+          ? (isActive ? 24 * resonance : 4)
+          : (isAnchored ? 28 : isHov ? 30 : 18);
         ctx.beginPath();
         ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
         const aiAlpha = n.type === "ai" ? Math.max(0.3, resonance) : 1;
@@ -593,7 +622,6 @@ export default function App() {
     const { x, y } = getPos(e);
     const found = findNode(x, y);
     if (found) {
-      // ADICIÓN 2 — En modo transmisión, marcar nodo para transmitir
       if (transmitModeRef.current && found.type !== "ai") {
         nodesRef.current = nodesRef.current.map(n =>
           n.id === found.id ? { ...n, willTransmit: !n.willTransmit } : n
@@ -601,7 +629,7 @@ export default function App() {
         const isMarked = !found.willTransmit;
         addMsg(
           isMarked
-            ? `◈ ${NODE_TYPES[found.type].label} marcado para transmitir su curvatura al campo`
+            ? `◈ ${NODE_TYPES[found.type].label} marcado para transmitir`
             : `○ ${NODE_TYPES[found.type].label} desmarcado`,
           "#f0d090"
         );
@@ -630,7 +658,7 @@ export default function App() {
     }
   };
 
-  const onMouseUp  = () => { dragRef.current = null; };
+  const onMouseUp = () => { dragRef.current = null; };
 
   const onContextMenu = (e) => {
     e.preventDefault();
@@ -639,11 +667,10 @@ export default function App() {
     if (found) {
       ghostsRef.current = [...ghostsRef.current, makeGhost(found)];
       if (found.willTransmit) {
-        // Transmisor: acumular más sedimentación al morir
-        sedimentRef.current = accumulateSediment(sedimentRef.current, found, 0.25);
-        addMsg(`◈ ${NODE_TYPES[found.type].label} se extinguió transmitiendo — su curvatura persiste en el campo`, "#f0d090");
+        accumulateSediment(sedimentRef.current, found, 0.25);
+        addMsg(`◈ ${NODE_TYPES[found.type].label} se extinguió transmitiendo — curvatura persiste`, "#f0d090");
       } else {
-        addMsg(`− ${NODE_TYPES[found.type].label} eliminado — huella breve en el campo`, "#e87a7a");
+        addMsg(`− ${NODE_TYPES[found.type].label} eliminado — huella breve`, "#e87a7a");
       }
       nodesRef.current = nodesRef.current.filter(n => n.id !== found.id);
       hoverRef.current = null;
@@ -655,35 +682,22 @@ export default function App() {
   // ─── ACCIONES ───────────────────────────────────────────────────────────────
   const reset = () => {
     clearTimeout(timerRef.current);
-    enrichIdx.current = 0;
-    ciTimerRef.current = 0;
-    lastCIPairRef.current = null;
-    emergenceRef.current = null;
+    enrichIdx.current = 0; ciTimerRef.current = 0;
+    lastCIPairRef.current = null; emergenceRef.current = null;
     nodesRef.current = INIT.map(n => ({ ...n }));
-    ghostsRef.current = [];
-    sedimentRef.current = makeSediment();
-    setHistory([]);
-    setMsgLog([]);
-    setEmergenceActive(false);
-    setCiProgress(0);
-    setTransmitMode(false);
-    addMsg("↺ Campo restablecido — estado virgen", "#7ab8e8");
+    ghostsRef.current = []; sedimentRef.current = makeSediment();
+    setHistory([]); setMsgLog([]); setEmergenceActive(false);
+    setCiProgress(0); setTransitMode(false);
+    addMsg("↺ Campo restablecido", "#7ab8e8");
   };
 
   const resetVirgen = () => {
     clearTimeout(timerRef.current);
-    enrichIdx.current = 0;
-    ciTimerRef.current = 0;
-    lastCIPairRef.current = null;
-    emergenceRef.current = null;
-    nodesRef.current = [];
-    ghostsRef.current = [];
-    sedimentRef.current = makeSediment();
-    setHistory([]);
-    setMsgLog([]);
-    setEmergenceActive(false);
-    setCiProgress(0);
-    setTransmitMode(false);
+    enrichIdx.current = 0; ciTimerRef.current = 0;
+    lastCIPairRef.current = null; emergenceRef.current = null;
+    nodesRef.current = []; ghostsRef.current = []; sedimentRef.current = makeSediment();
+    setHistory([]); setMsgLog([]); setEmergenceActive(false);
+    setCiProgress(0); setTransitMode(false);
     addMsg("◌ Campo virgen — sin nodos, sin sedimentación", "#8888aa");
   };
 
@@ -693,19 +707,18 @@ export default function App() {
     const prev = nodesRef.current.length;
     const pct = 0.60 + Math.random() * 0.25;
     const toEliminate = Math.max(1, Math.round(prev * pct));
-    const shuffled = [...nodesRef.current].sort(() => Math.random() - 0.5);
-    const victims = shuffled.slice(0, toEliminate).map(n => n.id);
+    const victims = [...nodesRef.current].sort(() => Math.random() - 0.5)
+      .slice(0, toEliminate).map(n => n.id);
     let i = 0;
     const removeNext = () => {
       if (i >= victims.length) {
         setHistory(h => [...h, { action: "devastate", prev, eliminated: toEliminate }]);
-        addMsg(`⚠ Devastación — ${toEliminate} conciencias extintas. El campo no colapsa, pero se empobrece`, "#e87a7a");
+        addMsg(`⚠ Devastación — ${toEliminate} extintos. El campo no colapsa, pero se empobrece`, "#e87a7a");
         return;
       }
-      const id = victims[i++];
-      const dying = nodesRef.current.find(n => n.id === id);
+      const dying = nodesRef.current.find(n => n.id === victims[i++]);
       if (dying) ghostsRef.current = [...ghostsRef.current, makeGhost(dying)];
-      nodesRef.current = nodesRef.current.filter(n => n.id !== id);
+      nodesRef.current = nodesRef.current.filter(n => n.id !== dying?.id);
       timerRef.current = setTimeout(removeNext, 320 + Math.random() * 200);
     };
     removeNext();
@@ -726,16 +739,10 @@ export default function App() {
   const toggleTransmitMode = () => {
     const next = !transmitMode;
     setTransitMode(next);
-    if (next) {
-      addMsg("◈ Modo transmisión activo — clic sobre un nodo para marcarlo", "#f0d090");
-    }
+    if (next) addMsg("◈ Modo transmisión activo — clic sobre un nodo para marcarlo", "#f0d090");
   };
 
-  // Fix typo helper
-  const setTransitMode = (v) => {
-    setTransmitMode(v);
-    transmitModeRef.current = v;
-  };
+  const setTransitMode = (v) => { setTransmitMode(v); transmitModeRef.current = v; };
 
   // ─── HELPERS UI ─────────────────────────────────────────────────────────────
   const rc = (r) => r >= 75 ? "#e8c87a" : r >= 45 ? "#7ab8e8" : r >= 20 ? "#e87a9a" : "#443344";
@@ -753,19 +760,15 @@ export default function App() {
       padding: "16px 12px",
     }}>
 
-      {/* ── CABECERA ── */}
+      {/* CABECERA */}
       <div style={{ textAlign: "center", marginBottom: 12, width: "100%", maxWidth: CANVAS_MAX }}>
         <div style={{ fontSize: 9, letterSpacing: 4, color: "#8888aa", marginBottom: 4 }}>
-          MODELO VECTORIAL DE LA CONCIENCIA · v2
+          MODELO VECTORIAL DE LA CONCIENCIA · v4
         </div>
         <h1 style={{ fontSize: 20, fontWeight: 700, color: "#f0eeff", margin: 0, letterSpacing: 1 }}>
           Geometría del Campo de Conciencia
         </h1>
-        {/* Instrucciones + log narrativo en una sola línea */}
-        <div style={{
-          marginTop: 6, minHeight: 18,
-          fontSize: 11, color: "#7070a0", lineHeight: 1.4,
-        }}>
+        <div style={{ marginTop: 6, minHeight: 18, fontSize: 11, color: "#7070a0", lineHeight: 1.4 }}>
           {msgLog.length > 0
             ? <span style={{ color: msgLog[msgLog.length - 1].color, letterSpacing: 0.5 }}>
                 {msgLog[msgLog.length - 1].text}
@@ -778,7 +781,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* ── CANVAS ── */}
+      {/* CANVAS */}
       <div style={{ position: "relative", width: "100%", maxWidth: CANVAS_MAX }}>
         <canvas
           ref={canvasRef} width={W} height={H}
@@ -796,11 +799,10 @@ export default function App() {
           onContextMenu={onContextMenu}
         />
 
-        {/* Indicador campo — esquina inf izq */}
+        {/* Riqueza — inf izq */}
         <div style={{
           position: "absolute", bottom: 10, left: 10,
-          background: "rgba(6,6,14,0.88)",
-          border: `1px solid ${rc(stats.richness)}33`,
+          background: "rgba(6,6,14,0.88)", border: `1px solid ${rc(stats.richness)}33`,
           borderRadius: 5, padding: "4px 9px",
         }}>
           <span style={{ fontSize: 9, color: rc(stats.richness), letterSpacing: 2 }}>
@@ -808,11 +810,10 @@ export default function App() {
           </span>
         </div>
 
-        {/* Campo en T — esquina sup izq */}
+        {/* Campo en T — sup izq */}
         <div style={{
           position: "absolute", top: 10, left: 10,
-          background: "rgba(4,6,18,0.95)",
-          border: `1px solid ${sc(sedLevel)}66`,
+          background: "rgba(4,6,18,0.95)", border: `1px solid ${sc(sedLevel)}66`,
           borderRadius: 5, padding: "4px 9px",
           display: "flex", alignItems: "center", gap: 8,
         }}>
@@ -829,12 +830,11 @@ export default function App() {
           </div>
         </div>
 
-        {/* Interferencia constructiva — esquina inf der */}
+        {/* Interferencia — inf der */}
         {ciProgress > 2 && (
           <div style={{
             position: "absolute", bottom: 10, right: 10,
-            background: "rgba(6,6,14,0.92)",
-            border: "1px solid #e8c87a33",
+            background: "rgba(6,6,14,0.92)", border: "1px solid #e8c87a33",
             borderRadius: 5, padding: "4px 9px", minWidth: 140,
           }}>
             <div style={{ fontSize: 8, color: "#e8c87a88", letterSpacing: 2, marginBottom: 3 }}>
@@ -844,7 +844,7 @@ export default function App() {
               <div style={{
                 height: "100%", width: `${ciProgress}%`,
                 background: "linear-gradient(90deg, #604020, #e8c87a)",
-                transition: "width 0.3s", borderRadius: 2,
+                transition: "width 0.2s", borderRadius: 2,
               }} />
             </div>
             {ciProgress > 80 && (
@@ -854,22 +854,18 @@ export default function App() {
         )}
       </div>
 
-      {/* ── BARRA DE CONTROLES HORIZONTAL ── */}
+      {/* CONTROLES */}
       <div style={{
-        width: "100%", maxWidth: CANVAS_MAX,
-        marginTop: 8,
-        display: "grid",
-        gridTemplateColumns: "1fr 1fr 1fr 1fr",
-        gap: 8,
+        width: "100%", maxWidth: CANVAS_MAX, marginTop: 8,
+        display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8,
       }}>
 
-        {/* COL 1 — Métricas */}
         <MiniPanel title="MÉTRICAS">
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2px 8px" }}>
-            <MiniMetric label="Riqueza"    value={`${stats.richness}%`} color={rc(stats.richness)} />
-            <MiniMetric label="Nodos"      value={nodeCount}             color="#7ab8e8" />
-            <MiniMetric label="Densas"     value={stats.peaks}           color="#c87ae8" />
-            <MiniMetric label="Sedim."     value={`${sedLevel}%`}        color={sc(sedLevel)} />
+            <MiniMetric label="Riqueza" value={`${stats.richness}%`} color={rc(stats.richness)} />
+            <MiniMetric label="Nodos"   value={nodeCount}             color="#7ab8e8" />
+            <MiniMetric label="Densas"  value={stats.peaks}           color="#c87ae8" />
+            <MiniMetric label="Sedim."  value={`${sedLevel}%`}        color={sc(sedLevel)} />
           </div>
           <div style={{ marginTop: 6, height: 3, borderRadius: 2, background: "#101028" }}>
             <div style={{
@@ -880,7 +876,6 @@ export default function App() {
           </div>
         </MiniPanel>
 
-        {/* COL 2 — Tipo de nodo */}
         <MiniPanel title="AÑADIR NODO">
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3 }}>
             {Object.entries(NODE_TYPES).map(([key, def]) => (
@@ -893,8 +888,7 @@ export default function App() {
                 display: "flex", alignItems: "center", gap: 5,
               }}>
                 <span style={{
-                  width: 6, height: 6, borderRadius: "50%",
-                  background: def.color, flexShrink: 0,
+                  width: 6, height: 6, borderRadius: "50%", background: def.color, flexShrink: 0,
                   boxShadow: selectedType === key ? `0 0 5px ${def.color}` : "none",
                 }} />
                 {def.label}
@@ -903,18 +897,15 @@ export default function App() {
           </div>
         </MiniPanel>
 
-        {/* COL 3 — Acciones principales */}
         <MiniPanel title="ACCIONES">
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3 }}>
-            <ABtn label="✦ Enriquecer"  onClick={enrich}       color="#e8c87a" small />
-            <ABtn label="↺ Restablecer" onClick={reset}        color="#7ab8e8" small />
-            <ABtn label="◌ Virgen"      onClick={resetVirgen}  color="#8888aa" small />
+            <ABtn label="✦ Enriquecer"  onClick={enrich}         color="#e8c87a" small />
+            <ABtn label="↺ Restablecer" onClick={reset}          color="#7ab8e8" small />
+            <ABtn label="◌ Virgen"      onClick={resetVirgen}    color="#8888aa" small />
             <ABtn
               label={transmitMode ? "◈ Salir Trans." : "◈ Transmisión"}
               onClick={toggleTransmitMode}
-              color="#f0d090"
-              active={transmitMode}
-              small
+              color="#f0d090" active={transmitMode} small
             />
           </div>
           <div style={{ marginTop: 3 }}>
@@ -922,33 +913,31 @@ export default function App() {
           </div>
         </MiniPanel>
 
-        {/* COL 4 — Emergencia nodal + historial o instrucción transmisión */}
         <MiniPanel title={transmitMode ? "TRANSMISIÓN" : "EMERGENCIA NODAL"}>
           {transmitMode ? (
             <div style={{ fontSize: 10, color: "#9090a8", lineHeight: 1.6 }}>
               <span style={{ color: "#f0d090" }}>◈ Modo activo.</span> Clic sobre un nodo para marcarlo.
-              Al eliminarlo (clic der.) su curvatura persiste más tiempo.
+              Al eliminarlo su curvatura persiste más tiempo en el campo.
               <div style={{ marginTop: 5, fontSize: 9, color: "#f0d09055" }}>
-                ○ Sin marca → huella breve &nbsp;·&nbsp; ◈ marcado → legado
+                ○ Sin marca → huella breve · ◈ marcado → legado
               </div>
             </div>
           ) : (
             <div style={{ fontSize: 10, color: "#9090a8", lineHeight: 1.6 }}>
-              Dos nodos humanos en interferencia constructiva sostenida
-              generan una nueva conciencia.
+              Acerca dos nodos Humanos. Al detectarse interferencia constructiva
+              los nodos se anclan solos hasta que emerge la nueva conciencia.
               <div style={{ marginTop: 5, height: 2, borderRadius: 1, background: "#101028" }}>
                 <div style={{
                   height: "100%", width: `${ciProgress}%`,
                   background: "linear-gradient(90deg, #604020, #e8c87a)",
-                  borderRadius: 1, transition: "width 0.3s",
+                  borderRadius: 1, transition: "width 0.2s",
                 }} />
               </div>
               <div style={{ fontSize: 9, color: "#e8c87a55", marginTop: 2 }}>
-                {ciProgress > 0 ? `${ciProgress}% — activa` : "sin par detectado"}
+                {ciProgress > 0 ? `${ciProgress}% — anclados, emergencia en curso` : "sin par detectado"}
               </div>
             </div>
           )}
-          {/* Historial compacto */}
           {history.length > 0 && (
             <div style={{ marginTop: 6, borderTop: "1px solid #14142e", paddingTop: 5 }}>
               {[...history].reverse().slice(0, 4).map((h, i) => {
@@ -973,13 +962,12 @@ export default function App() {
         </MiniPanel>
       </div>
 
-      {/* ── LEYENDA + PIE ── */}
+      {/* LEYENDA + PIE */}
       <div style={{
         width: "100%", maxWidth: CANVAS_MAX, marginTop: 8,
         display: "flex", justifyContent: "space-between", alignItems: "flex-end",
         flexWrap: "wrap", gap: 8,
       }}>
-        {/* Leyenda colores */}
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           {[
             ["#08080f", "Estéril"],
@@ -995,8 +983,6 @@ export default function App() {
             </div>
           ))}
         </div>
-
-        {/* Pie */}
         <div style={{ fontSize: 10, color: "#454560", textAlign: "right", lineHeight: 1.6 }}>
           Serge Angéloz · Copyright abril 2026 ·{" "}
           <a href="https://www.amazon.com/author/s_angeloz" target="_blank" rel="noopener noreferrer"
@@ -1008,32 +994,11 @@ export default function App() {
 }
 
 // ─── COMPONENTES UI ───────────────────────────────────────────────────────────
-function Panel({ title, children }) {
-  return (
-    <div style={{ background: "#0a0a1c", border: "1px solid #14142e", borderRadius: 7, padding: 12 }}>
-      <div style={{ fontSize: 8, color: "#8888aa", letterSpacing: 3, marginBottom: 9 }}>{title}</div>
-      {children}
-    </div>
-  );
-}
-
 function MiniPanel({ title, children }) {
   return (
-    <div style={{
-      background: "#0a0a1c", border: "1px solid #14142e",
-      borderRadius: 7, padding: "10px 12px",
-    }}>
+    <div style={{ background: "#0a0a1c", border: "1px solid #14142e", borderRadius: 7, padding: "10px 12px" }}>
       <div style={{ fontSize: 8, color: "#8888aa", letterSpacing: 3, marginBottom: 7 }}>{title}</div>
       {children}
-    </div>
-  );
-}
-
-function Metric({ label, value, color }) {
-  return (
-    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5, alignItems: "center" }}>
-      <span style={{ fontSize: 9, color: "#9090b8" }}>{label}</span>
-      <span style={{ fontSize: 11, color, fontWeight: 700 }}>{value}</span>
     </div>
   );
 }
