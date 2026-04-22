@@ -560,8 +560,28 @@ export default function App() {
       <div style={{ marginTop: 12, fontSize: 12, color: "#5a5a7a", textAlign: "center", maxWidth: 620, lineHeight: 1.85 }}>
         Cada nodo oscila orgánicamente manifestando su relación y simbiosis con el campo colectivo.
         La destrucción masiva de nodos empobrece la topografía disponible para futuras emergencias conscientes.
-        <div style={{ marginTop: 8, fontSize: 8, color: "#5a5a7a" }}>
-          S. Angéloz · MVC 2026 · Colaboración humano-IA
+        <div style={{ marginTop: 8, fontSize: 10, color: "#7a7aa8", lineHeight: 1.7 }}>
+          Si quieres saber mas sobre el tema y libros, da click{" "}
+          <a
+            href="https://www.amazon.com/author/s_angeloz"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "#c8c8da" }}
+          >
+            aqui
+          </a>
+          .
+        </div>
+        <div style={{ marginTop: 8, fontSize: 9, color: "#5a5a7a", lineHeight: 1.7 }}>
+          Serge Angeloz · Copyright abril 2026 ·{" "}
+          <a
+            href="https://www.amazon.com/author/s_angeloz"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "#9090b8" }}
+          >
+            Pagina de autor
+          </a>
         </div>
       </div>
     </div>
